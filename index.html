@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="hr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Simmer – Konoba More</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: linear-gradient(135deg, #d9e8ff, #f5f9ff);
+      margin: 0;
+      padding: 0;
+    }
+
+    #chat-widget {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      width: 380px;
+      height: 520px;
+      background: white;
+      border-radius: 18px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 2px solid #0b63c5;
+      animation: fadeIn 0.6s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    #chat-header {
+      background: linear-gradient(135deg, #0b63c5, #3b8de0);
+      color: white;
+      text-align: center;
+      padding: 12px;
+      font-weight: 600;
+      font-size: 16px;
+      letter-spacing: 0.3px;
+    }
+
+    #chat-messages {
+      flex: 1;
+      padding: 14px;
+      overflow-y: auto;
+      background: #f7faff;
+    }
+
+    .msg {
+      margin-bottom: 12px;
+      line-height: 1.5;
+      border-radius: 10px;
+      padding: 10px 12px;
+      max-width: 80%;
+      word-wrap: break-word;
+    }
+
+    .user {
+      background: #e1f0ff;
+      color: #003366;
+      align-self: flex-end;
+      margin-left: auto;
+    }
+
+    .ai {
+      background: #0b63c5;
+      color: white;
+      align-self: flex-start;
+      margin-right: auto;
+    }
+
+    #chat-input {
+      display: flex;
+      border-top: 1px solid #cfd8e3;
+      background: white;
+    }
+
+    #chat-input input {
+      flex: 1;
+      padding: 12px;
+      border: none;
+      outline: none;
+      font-size: 15px;
+      border-radius: 0;
+    }
+
+    #chat-input button {
+      background: #0b63c5;
+      color: white;
+      border: none;
+      padding: 12px 16px;
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 14px;
+      transition: background 0.2s;
+    }
+
+    #chat-input button:hover {
+      background: #084a91;
+    }
+
+    /* scrollbar */
+    #chat-messages::-webkit-scrollbar {
+      width: 6px;
+    }
+    #chat-messages::-webkit-scrollbar-thumb {
+      background: #0b63c5;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="chat-widget">
+    <div id="chat-header">💬 AI Simmer – Konoba More</div>
+    <div id="chat-messages"></div>
+    <div id="chat-input">
+      <input type="text" id="user-input" placeholder="Postavi pitanje..." />
+      <button onclick="sendMessage()">Pošalji</button>
+    </div>
+  </div>
+
+  <script>
+    const messages = document.getElementById("chat-messages");
+
+    // Pozdravna poruka kad se otvori chat
+    messages.innerHTML += `<div class="msg ai">👋 Dobar dan! Dobrodošli u Konobu More. Kako Vam mogu pomoći?</div>`;
+
+    async function sendMessage() {
+      const input = document.getElementById("user-input");
+      const message = input.value.trim();
+      if (!message) return;
+
+      messages.innerHTML += `<div class="msg user">${message}</div>`;
+      input.value = "";
+
+      try {
+        const res = await fetch("/api/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            slug: "konoba-more",
+            message
+          })
+        });
+
+        const data = await res.json();
+        if (data.reply || data.answer) {
+          const reply = data.reply || data.answer;
+          messages.innerHTML += `<div class="msg ai">${reply}</div>`;
+        } else if (data.error) {
+          messages.innerHTML += `<div class="msg ai">⚠️ Greška: ${data.error}</div>`;
+        }
+      } catch (err) {
+        messages.innerHTML += `<div class="msg ai">⚠️ Server nije dostupan.</div>`;
+      }
+
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    // Enter za slanje
+    document.getElementById("user-input").addEventListener("keypress", function(e) {
+      if (e.key === "Enter") sendMessage();
+    });
+  </script>
+
+</body>
+</html>
