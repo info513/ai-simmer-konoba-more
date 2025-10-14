@@ -236,6 +236,18 @@ app.post('/api/ask', async (req, res) => {
     return res.status(500).json({ error: msg });
   }
 });
+// --- Health & root probes (GET) ---
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    message: 'AI Simmer server is healthy',
+    uptime: process.uptime()
+  });
+});
+
+app.get('/', (req, res) => {
+  res.type('text').send('AI Simmer up');
+});
 
 /* ----------------------- START ----------------------- */
 app.listen(CFG.port, () => {
