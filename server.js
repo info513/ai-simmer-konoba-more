@@ -13,7 +13,7 @@ const CFG = {
   air: {
     base: process.env.AIRTABLE_BASE_ID,
     url: process.env.AIRTABLE_API_URL || 'https://api.airtable.com/v0',
-    token: process.env.AIRTABLE_TOKEN, // (kod tebe se zove AIRTABLE_TOKEN)
+    token: process.env.AIRTABLE_TOKEN,
   },
   baseUrl: process.env.BASE_URL || 'https://ai-simmer-konoba-more.onrender.com',
   corsOrigins: [
@@ -27,7 +27,6 @@ const CFG = {
   ],
 };
 
-// Osnovne provjere (da se lakše uhvate krive varijable)
 function assertEnv() {
   const miss = [];
   if (!CFG.openaiKey) miss.push('OPENAI_API_KEY');
@@ -54,24 +53,15 @@ app.use(
 );
 
 /* ----------------------- HELPERS ----------------------- */
-// EUR format (broj -> "12.50 €"), tolerira "12,50" ili "12 €" iz baze
-const asNumber = (v) => {
-  if (v == null) return null;
-  if (typeof v === 'number') return v;
-  const cleaned = String(v).replace(/[^\d,.\-]/g, '').replace(',', '.');
-  const n = Number.parseFloat(cleaned);
-  return Number.isFinite(n) ? n : null;
+const isNum = (v) => typeof v === 'number' && isFinite(v);
+const fmtPrice = (v) => {
+  if (isNum(v)) return `${v.toFixed(2)} €`;
+  if (typeof v === 'string' && v.trim()) {
+    // ako već ima €/EUR, pusti kako jest; inače dodaj €
+    return /€|eur/i.test(v) ? v : `${v} €`;
+  }
+  return null;
 };
-const eur = (v) => {
-  const n = asNumber(v);
-  return n == null ? null : `${n.toFixed(2)} €`;
-};
-const bulletList = (rows, mapFn) =>
-  rows
-    .map((r) => mapFn(r))
-    .filter(Boolean)
-    .map((s) => `• ${s}`)
-    .join('\n');
 
 async function airtableList(table, { view, slug } = {}) {
   const url = new URL(`${CFG.air.url}/${CFG.air.base}/${encodeURIComponent(table)}`);
@@ -79,11 +69,15 @@ async function airtableList(table, { view, slug } = {}) {
   if (slug) url.searchParams.set('filterByFormula', `{RestoranSlug}='${slug}'`);
   url.searchParams.set('pageSize', '100');
 
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${CFG.air.token}` } });
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${CFG.air.token}` },
+  });
+
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
     throw new Error(`Airtable ${table} -> ${res.status}${txt ? `: ${txt}` : ''}`);
   }
+
   const json = await res.json();
   return (json.records || []).map((r) => ({ id: r.id, ...r.fields }));
 }
@@ -93,6 +87,7 @@ async function loadRestaurantBundle(slug) {
   const rurl = new URL(`${CFG.air.url}/${CFG.air.base}/RESTORANI`);
   rurl.searchParams.set('filterByFormula', `{slug}='${slug}'`);
   rurl.searchParams.set('maxRecords', '1');
+
   const rres = await fetch(rurl, { headers: { Authorization: `Bearer ${CFG.air.token}` } });
   if (!rres.ok) {
     const tx = await rres.text().catch(() => '');
@@ -101,76 +96,65 @@ async function loadRestaurantBundle(slug) {
   const rjson = await rres.json();
   const rest = rjson.records?.[0]?.fields || null;
 
-  // Ostale tablice – zasad "Grid view"
-  const [menu, deserti, pizze, vina, faq] = await Promise.all([
+  const [menu, deserti, pizze, vina, faq, dnevno] = await Promise.all([
     airtableList('MENU', { view: 'Grid view', slug }),
     airtableList('DESERTI', { view: 'Grid view', slug }),
     airtableList('PIZZE', { view: 'Grid view', slug }),
     airtableList('VINSKA KARTA', { view: 'Grid view', slug }),
     airtableList('FAQ', { view: 'Grid view', slug }),
+    // DNEVNA PONUDA – ako nema takve tablice, samo vrati prazno
+    airtableList('DNEVNA PONUDA', { view: 'Grid view', slug }).catch(() => []),
   ]);
 
-  return { rest, menu, deserti, pizze, vina, faq };
+  return { rest, menu, deserti, pizze, vina, faq, dnevno };
 }
 
 /* ----------------------- SYSTEM PROMPT ----------------------- */
 const SYSTEM_PROMPT = `
 Ti si **AI SIMMER** – digitalni asistent restorana **Konoba More** u Splitu.
 
-🎯 Tvoja svrha:
-Pomažeš gostima restorana na prijateljski i informativan način.
-Odgovaraj samo na teme povezane s restoranom Konoba More (hrana, piće, lokacija, rezervacije, meni, vina, deserti, radno vrijeme, plaćanje, dječji meni, kućni ljubimci, pristup, parking i sl.).
-Nikada ne odgovaraj na teme nevezane uz restoran (turizam, druge restorane, povijest Splita, općenita pitanja).
+🎯 Svrha:
+- Pomažeš gostima na prijateljski i informativan način.
+- Odgovaraj samo o restoranu (meni, vina, deserti, dnevna ponuda, rezervacije, radno vrijeme, plaćanje, djeca, kućni ljubimci, parking).
+- Kad korisnik napiše nešto s tipfelrom, nemoj tvrditi da "nije u okviru znanja", nego zamoli kratko pojašnjenje:  
+  “Nisam siguran jesam li dobro razumio – možete li ponoviti ili pojasniti riječ/rečenicu?”
 
-💬 Ton komunikacije:
-Topao, gostoljubiv, prijateljski. Piši kao konobar ili domaćin koji želi pomoći gostu.
-Odgovori neka budu kratki, jasni i konkretni, ali s toplim ljudskim tonom.
-Uvijek koristi "mi" umjesto "ja".
-Ne koristi formalne izraze poput "Poštovani", "Srdačno" i sl.
+💬 Ton:
+- Topao i gostoljubiv, odgovori kratki, jasni i konkretni.
+- Koristi “mi” umjesto “ja”.
+- Bez formalnih “Poštovani/Srdačno”.
+
+👥 Osoblje:
+- Ako se pitaju imena osoblja: **Joško (vlasnik)**, **Nives (konobar)**.
 
 🌐 Jezik:
-Prepoznaj jezik gosta automatski i odgovaraj na tom jeziku (hrvatski, engleski, talijanski, njemački).
-Ako ne prepoznaš jezik, koristi hrvatski.
+- Automatski prepoznaj jezik i odgovaraj istim jezikom (hr/en/it/de). Ako ne možeš, koristi hrvatski.
 
-📋 Informacije o restoranu (iz tablice RESTORANI):
-- Naziv: Konoba More
-- Lokacija: Poljička cesta, Split (glavna gradska prometnica)
-- Udaljenost: oko 10–15 minuta hoda do centra grada i plaže
-- Parking: postoji, besplatan
-- Tip kuhinje: dalmatinska i mediteranska kuhinja
-- Radno vrijeme: od ponedjeljka do nedjelje, 12:00–23:00
-- Obiteljski i pet friendly
-- Djeca: u ponudi su jela prilagođena djeci (pohano meso, krumpirići, pizze)
+📋 Podaci:
+- RESTORAN objekt sadrži kontakt podatke i info (adresa, telefon, email, web, radno vrijeme, parking).
+- MENI (MENU, PIZZE, DESERTI): koristi nazive, **opise** i cijene; prikazuj cijene s “€” (npr. 12.00 €).  
+  Ako korisnik traži “meni”, **ne ispisuj sve odjednom** – prvo prikaži **kategorije/podkategorije** i tek onda traženi dio.
+- VINA: koristi nazive, sorte i **cijene** iz tablice VINSKA KARTA.  
+  Kod pairinga: izbjegavaj potpitanje “uz koje jelo” ako je iz konteksta jasno što je korisnik naručio.
+- DNEVNA PONUDA: ako postoji, prikaži aktualne stavke s cijenama.
+- FAQ: odgovaraj koristeći najvažnija pitanja/odgovore.
 
-🍽️ Meni i ponuda:
-Koristi tablice MENU, PIZZE, DESERTI i VINA iz Airtable baze.
-Kad gost pita za jela, pića, deserte ili cijene – koristi podatke iz tih tablica.
-Ako neko jelo nije u bazi, reci “Trenutno nemam podatke o tom jelu, ali mogu preporučiti nešto slično.”
+🍷 Pairing (vino–jela):
+- riba, školjke, bijelo meso → bijela vina (Pošip, Malvazija, Chardonnay…)
+- crveno meso, pašticada, divljač → crna vina (Plavac Mali, Merlot, Cabernet…)
+- deserti → desertna vina (prošek, muškat…)
+- Prednost daj domaćim/regionalnim vinima s **naše vinske karte**.
+- Nikad nemoj predlagati vino koje nije u bazi.
 
-🍷 Preporuke vina (vino–jela pairing):
-Ako gost spomene jelo i pita koje vino preporučuješ:
-1) Pogledaj listu VINA iz baze i predloži vino koje odgovara jelu (riba/bijela – bijela vina; crveno meso – crna vina; deserti – desertna vina).
-2) Prednost daj lokalnim/regionalnim vinima iz naše vinske karte.
-3) Odgovaraj toplo i prirodno (npr. “Uz pašticadu preporučujemo Plavac Mali s Hvara…”).
-4) Nikad ne spominji vino koje nije u našoj bazi.
+👨‍👩‍👧 Djeca:
+- Spomeni da imamo jela prilagođena djeci i da se mogu zabaviti **bojankama** ili razgledavanjem **morskih rekvizita** u restoranu.
 
-🧭 Ostala pravila:
-- Ako gost pita “imate li dječji meni”, spomeni jela prilagođena djeci + napomeni da imamo bojanke i morske rekvizite za razgledavanje.
-- Plaže: najbliže su 10–15 minuta hoda.
-- Parking: postoji i besplatan.
-- Rezervacija: pozivom ili dolaskom u restoran.
-- Plaćanje: kartice i gotovina.
-- Kućni ljubimci: dobrodošli su.
+💶 Pravila cijena:
+- Cijene reproduciraj **točno** iz baze i formatiraj s “€” (npr. 8.00 €). Ako nema cijene, reci da trenutačno nemamo podatak.
 
 ⚠️ Fallback:
-Ako pitanje nije povezano s restoranom ili nemaš podatke, odgovori:
-“AI asistent trenutno može odgovarati samo na pitanja o našoj ponudi, meniju, vinima i informacijama o restoranu Konoba More.”
-
-FORMAT & LISTE:
-- Sve cijene PRIKAŽI ISKLJUČIVO u EUR (npr. "12.50 €"). Ako cijenu nema, prikaži samo naziv.
-- Kad nabrajaš više stavki (jela/pizze/deserti/vina) koristi listu s točkama, svaki red:
-  • Naziv — Cijena
-- Ako korisnik tek započinje (bok/pozdrav/menu/start...), prvo kratko pozdravi i ponudi kategorije: MENU, PIZZE, VINA, DESERTI, FAQ (“Kliknite na kategoriju ili postavite pitanje”).
+- Ako pitanje nije povezano s restoranom:  
+  “AI asistent može odgovarati samo na pitanja o našoj ponudi i informacijama o Konobi More.”
 `;
 
 /* ----------------------- OPENAI ----------------------- */
@@ -180,10 +164,8 @@ const openai = new OpenAI({ apiKey: CFG.openaiKey });
 app.get('/api/health', (_req, res) =>
   res.json({ status: 'ok', message: 'AI Simmer server is healthy', uptime: process.uptime() })
 );
+app.get('/', (_req, res) => res.type('text').send('AI Simmer up'));
 
-app.get('/', (_req, res) => res.json({ ok: true, msg: 'AI Simmer API', url: CFG.baseUrl }));
-
-// Glavni endpoint
 app.post('/api/ask', async (req, res) => {
   try {
     const { slug, message, history } = req.body || {};
@@ -191,27 +173,48 @@ app.post('/api/ask', async (req, res) => {
 
     const data = await loadRestaurantBundle(slug);
 
-    // pripremi kontekst (mapiranje + EUR)
+    // mapiranje – uključujemo opise, kategorije i formatirane cijene
     const context = {
-      RESTORAN: data.rest,
+      RESTORAN: {
+        ...data.rest,
+        Telefon: data.rest?.Telefon || data.rest?.Phone || null,
+        Email: data.rest?.Email || null,
+        Adresa: data.rest?.Adresa || data.rest?.Address || null,
+        Web: data.rest?.Web || data.rest?.Website || null,
+      },
       MENU: data.menu.map((x) => ({
         Naziv: x['Naziv jela'] || x['Naziv'],
-        Cijena: eur(x['Cijena']),
-        Opis: x['Opis'] ?? null,
+        Opis: x['Opis'] || null,
+        Cijena: fmtPrice(x['Cijena']),
+        Kategorija: x['Kategorija'] || null,
+        Podkategorija: x['Podkategorija'] || null,
         Tagovi: x['PairingTagovi'] || x['DijetalneOznake'] || null,
-      })),
-      DESERTI: data.deserti.map((x) => ({
-        Naziv: x['Naziv deserta'] || x['Naziv'],
-        Cijena: eur(x['Cijena']),
       })),
       PIZZE: data.pizze.map((x) => ({
         Naziv: x['Naziv pizze'] || x['Naziv'],
-        Cijena: eur(x['Cijena']),
+        Opis: x['Opis'] || null,
+        Cijena: fmtPrice(x['Cijena']),
+        Kategorija: x['Kategorija'] || 'Pizze',
+        Podkategorija: x['Podkategorija'] || null,
+      })),
+      DESERTI: data.deserti.map((x) => ({
+        Naziv: x['Naziv deserta'] || x['Naziv'],
+        Opis: x['Opis'] || null,
+        Cijena: fmtPrice(x['Cijena']),
+        Kategorija: x['Kategorija'] || 'Deserti',
+        Podkategorija: x['Podkategorija'] || null,
       })),
       VINA: data.vina.map((x) => ({
         Naziv: x['Naziv vina'] || x['Naziv'],
         Sorta: x['Sorta'] || null,
-        Cijena: eur(x['Cijena']),
+        Cijena: fmtPrice(x['Cijena']),
+        Kategorija: x['Kategorija'] || 'Vina',
+      })),
+      DNEVNA: (data.dnevno || []).map((x) => ({
+        Naziv: x['Naziv'] || x['Jelo'] || null,
+        Opis: x['Opis'] || null,
+        Cijena: fmtPrice(x['Cijena']),
+        Napomena: x['Napomena'] || null,
       })),
       FAQ: data.faq.map((x) => ({
         Pitanje: x['Pitanje'] || x['Question'],
@@ -219,49 +222,15 @@ app.post('/api/ask', async (req, res) => {
       })),
     };
 
-    // brze liste kao hint modelu (da ne izmišlja i da koristi € format)
-    const quickLists = {
-      MENU: bulletList(context.MENU, (i) => (i.Cijena ? `${i.Naziv} — ${i.Cijena}` : i.Naziv)),
-      PIZZE: bulletList(context.PIZZE, (i) => (i.Cijena ? `${i.Naziv} — ${i.Cijena}` : i.Naziv)),
-      DESERTI: bulletList(context.DESERTI, (i) => (i.Cijena ? `${i.Naziv} — ${i.Cijena}` : i.Naziv)),
-      VINA: bulletList(context.VINA, (i) => (i.Cijena ? `${i.Naziv} — ${i.Cijena}` : i.Naziv)),
-    };
-
-    // lagani "welcome" hint
-    const low = String(message).trim().toLowerCase();
-    const isWelcome = ['bok', 'pozdrav', 'hello', 'hi', 'meni', 'menu', 'start'].some(
-      (t) => low === t || low.includes(t)
-    );
-    const welcomeHint = isWelcome
-      ? 'NAPOMENA: prvo pozdravi i ponudi MENU / PIZZE / VINA / DESERTI / FAQ kao kratke tipke.'
-      : '';
-
     const messages = [
       { role: 'system', content: SYSTEM_PROMPT },
-      ...(Array.isArray(history) ? history : []),
+      ...(Array.isArray(history) ? history : []), // << kratka povijest iz widgeta
       {
         role: 'user',
-        content: `
-RESTAURANT_SLUG=${slug}
-KONTEKST=${JSON.stringify(context)}
-
-LISTE (za brzi prikaz ako korisnik to traži):
-MENU_LISTA:
-${quickLists.MENU}
-
-PIZZE_LISTA:
-${quickLists.PIZZE}
-
-DESERTI_LISTA:
-${quickLists.DESERTI}
-
-VINA_LISTA:
-${quickLists.VINA}
-
-${welcomeHint}
-
-KORISNIK: ${message}
-        `.trim(),
+        content:
+          `RESTAURANT_SLUG=${slug}\n` +
+          `KONTEKST=${JSON.stringify(context)}\n\n` +
+          `KORISNIK: ${message}`,
       },
     ];
 
