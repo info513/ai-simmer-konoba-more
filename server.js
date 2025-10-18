@@ -57,12 +57,12 @@ const isNum = (v) => typeof v === 'number' && isFinite(v);
 const fmtPrice = (v) => {
   if (isNum(v)) return `${v.toFixed(2)} €`;
   if (typeof v === 'string' && v.trim()) {
-    // ako već ima €/EUR, pusti kako jest; inače dodaj €
     return /€|eur/i.test(v) ? v : `${v} €`;
   }
   return null;
 };
-// Vrati prvu postojeću vrijednost iz liste naziva polja (razni nazivi u tablici)
+
+// prva postojeća vrijednost iz liste naziva polja (točno po imenu)
 function getField(rec, names) {
   for (const n of names) {
     const v = rec?.[n];
@@ -71,20 +71,49 @@ function getField(rec, names) {
   return null;
 }
 
-// Skupi sve (moguće) cijene vina → čaša / boca / pola boce / 0.187 / 0.25 / 0.5
+// tekstualno polje s varijantama naziva (pokušaj exact → fallback regex po ključevima)
+function getTextField(rec, candidates) {
+  const exact = getField(rec, candidates);
+  if (exact) return exact;
+  const keys = Object.keys(rec || {});
+  for (const k of keys) {
+    const kl = k.toLowerCase();
+    for (const cand of candidates) {
+      const c = cand.toLowerCase();
+      if (kl.includes(c)) {
+        const val = rec[k];
+        if (val !== undefined && val !== null && String(val).trim() !== '') return val;
+      }
+    }
+  }
+  return null;
+}
+
+// Skupi cijene vina iz raznih mogućih naziva kolona (čaša / butelja / 0.5 / 0.25 / 0.187)
 function buildWinePrices(rec) {
-  const byGlass = getField(rec, ['Čaša', 'Cijena čaše', 'Cijena casa', 'Glass', 'By glass', 'Cijena čaša']);
-  const bottle  = getField(rec, ['Butelja', 'Cijena boce', 'Cijena butelje', 'Boca', 'Bottle']);
-  const half    = getField(rec, ['0.5l', '0,5 l', '0.5 L', 'Pola boce', 'Demije']);
-  const q0187   = getField(rec, ['0.187', '0,187', '0.187 l']);
-  const q025    = getField(rec, ['0.25', '0,25', '0.25 l']);
+  if (!rec) return { prices: {}, priceText: null, main: null };
+  const entries = Object.entries(rec).filter(
+    ([, v]) => v !== undefined && v !== null && String(v).trim() !== ''
+  );
+
+  let byGlass = null, bottle = null, half = null, q0187 = null, q025 = null;
+  for (const [key, raw] of entries) {
+    const k = key.toLowerCase();
+    const val = typeof raw === 'string' ? raw.replace(',', '.').trim() : raw;
+
+    if (!byGlass && (k.includes('čaš') || k.includes('casa') || k.includes('glass'))) { byGlass = val; continue; }
+    if (!bottle  && (k.includes('butelj') || k.includes('boca') || k.includes('bottle'))) { bottle = val; continue; }
+    if (!half    && (k.includes('0.5') || k.includes('0,5'))) { half = val; continue; }
+    if (!q025    && (k.includes('0.25') || k.includes('0,25'))) { q025 = val; continue; }
+    if (!q0187   && (k.includes('0.187') || k.includes('0,187'))) { q0187 = val; continue; }
+  }
 
   const prices = {
     casa:  fmtPrice(byGlass),
     boca:  fmtPrice(bottle),
     pola:  fmtPrice(half),
-    q0187: fmtPrice(q0187),
     q025:  fmtPrice(q025),
+    q0187: fmtPrice(q0187),
   };
 
   const parts = [];
@@ -94,7 +123,8 @@ function buildWinePrices(rec) {
   if (prices.q025) parts.push(`0.25 l: ${prices.q025}`);
   if (prices.q0187) parts.push(`0.187 l: ${prices.q0187}`);
 
-  return { prices, priceText: parts.join(' • ') || null, main: prices.boca || prices.casa || null };
+  const main = prices.boca || prices.casa || null;
+  return { prices, priceText: parts.join(' • ') || null, main };
 }
 
 async function airtableList(table, { view, slug } = {}) {
@@ -136,7 +166,6 @@ async function loadRestaurantBundle(slug) {
     airtableList('PIZZE', { view: 'Grid view', slug }),
     airtableList('VINSKA KARTA', { view: 'Grid view', slug }),
     airtableList('FAQ', { view: 'Grid view', slug }),
-    // DNEVNA PONUDA – ako nema takve tablice, samo vrati prazno
     airtableList('DNEVNA PONUDA', { view: 'Grid view', slug }).catch(() => []),
   ]);
 
@@ -161,11 +190,14 @@ Ti si **AI SIMMER** – digitalni asistent restorana **Konoba More** u Splitu.
 - Ako se pitaju imena osoblja: **Joško (vlasnik)**, **Nives (konobar)**.
 
 🌐 Jezik:
-- Automatski prepoznaj jezik i odgovaraj istim (hr/en/it/de). Ako ne možeš, koristi hrvatski.
+- Uvijek odgovaraj na jeziku **posljednje korisničke poruke**.
+- Ako je dostupna varijabla VisitorLanguage, koristi je kao preferirani jezik, osim ako je jezik korisničke poruke drugačiji – tada slijedi jezik poruke.
+- Primjeri podržanih jezika: hr/en/it/de — ali se prilagodi bilo kojem jeziku koji korisnik koristi.
 
 📋 Podaci i pravila:
-- MENI/PIZZE/DESERTI: za sadržaj jela OBAVEZNO koristi polje **Opis** (doslovno – bez izmišljanja).  
+- MENI/PIZZE/DESERTI: za sadržaj jela OBAVEZNO koristi polje **Opis** (doslovno – bez izmišljanja).
   Ako korisnik pita “od čega se sastoji…”, “je li odležani biftek…”, “što uključuje riblja plata” – uzmi iz **Opis**.
+  Ako **Opis** nije upisan, jasno reci da opis trenutačno nije dostupan.
 - VINA: koristi nazive, sorte i **sve dostupne cijene**. Ako postoje više cijena (čaša/butelja/0.5 l/0.25 l/0.187 l) – prikaži sve koje postoje.
 - Cijene reproduciraj točno i formatiraj s “€” (npr. 8.00 €). Ako cijene nema, reci da trenutačno nemamo podatak.
 - Pri prikazu menija **ne izbacuj cijeli jelovnik** odjednom – najprije prikaži kategorije/podkategorije pa traženi dio.
@@ -187,7 +219,6 @@ Ti si **AI SIMMER** – digitalni asistent restorana **Konoba More** u Splitu.
   “AI asistent može odgovarati samo na pitanja o našoj ponudi i informacijama o Konobi More.”
 `;
 
-
 /* ----------------------- OPENAI ----------------------- */
 const openai = new OpenAI({ apiKey: CFG.openaiKey });
 
@@ -197,78 +228,93 @@ app.get('/api/health', (_req, res) =>
 );
 app.get('/', (_req, res) => res.type('text').send('AI Simmer up'));
 
+// (Opcionalno) Debug – vidi ključeve iz VINSKA KARTA (odkomentiraj po potrebi)
+// app.get('/api/debug/vina', async (req, res) => {
+//   try {
+//     const { slug } = req.query;
+//     if (!slug) return res.status(400).json({ error: 'slug je obavezan' });
+//     const vina = await airtableList('VINSKA KARTA', { view: 'Grid view', slug });
+//     const sample = vina[0] || null;
+//     res.json({ count: vina.length, sampleKeys: sample ? Object.keys(sample) : [], sampleRecord: sample || null });
+//   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+// });
+
 app.post('/api/ask', async (req, res) => {
   try {
     const { slug, message, history } = req.body || {};
     if (!slug || !message) return res.status(400).json({ error: 'slug i message su obavezni' });
 
+    // Hint jezika posjetitelja iz headera (npr. "hr-HR,hr;q=0.9,en;q=0.8")
+    const acceptLang = String(req.headers['accept-language'] || '').split(',')[0] || '';
+    const visitorLang = acceptLang.split('-')[0] || '';
+
     const data = await loadRestaurantBundle(slug);
 
-        // mapiranje – uključujemo opise, kategorije i formatirane cijene + sve cijene vina
-const context = {
-  RESTORAN: {
-    ...data.rest,
-    Telefon: data.rest?.Telefon || data.rest?.Phone || null,
-    Email:   data.rest?.Email   || null,
-    Adresa:  data.rest?.Adresa  || data.rest?.Address || null,
-    Web:     data.rest?.Web     || data.rest?.Website || null,
-  },
+    // mapiranje – uključujemo opise, kategorije i formatirane cijene + sve cijene vina
+    const context = {
+      RESTORAN: {
+        ...data.rest,
+        Telefon: data.rest?.Telefon || data.rest?.Phone || null,
+        Email:   data.rest?.Email   || null,
+        Adresa:  data.rest?.Adresa  || data.rest?.Address || null,
+        Web:     data.rest?.Web     || data.rest?.Website || null,
+      },
 
-  MENU: data.menu.map((x) => ({
-    Naziv:   x['Naziv jela'] || x['Naziv'],
-    Opis:    x['Opis'] || null, // ← Sadržaj jela
-    Cijena:  fmtPrice(x['Cijena']),
-    Kategorija:    x['Kategorija'] || null,
-    Podkategorija: x['Podkategorija'] || null,
-    Tagovi:  x['PairingTagovi'] || x['DijetalneOznake'] || null,
-  })),
+      MENU: data.menu.map((x) => ({
+        Naziv:   x['Naziv jela'] || x['Naziv'],
+        Opis:    getTextField(x, ['Opis', 'Opis jela', 'Sastojci', 'Opis jelo', 'Description', 'Ingredients']),
+        Cijena:  fmtPrice(x['Cijena']),
+        Kategorija:    x['Kategorija'] || null,
+        Podkategorija: x['Podkategorija'] || null,
+        Tagovi:  x['PairingTagovi'] || x['DijetalneOznake'] || null,
+      })),
 
-  PIZZE: data.pizze.map((x) => ({
-    Naziv:   x['Naziv pizze'] || x['Naziv'],
-    Opis:    x['Opis'] || null,
-    Cijena:  fmtPrice(x['Cijena']),
-    Kategorija:    x['Kategorija'] || 'Pizze',
-    Podkategorija: x['Podkategorija'] || null,
-  })),
+      PIZZE: data.pizze.map((x) => ({
+        Naziv:   x['Naziv pizze'] || x['Naziv'],
+        Opis:    getTextField(x, ['Opis', 'Opis pizze', 'Opis jela', 'Sastojci', 'Description', 'Ingredients']),
+        Cijena:  fmtPrice(x['Cijena']),
+        Kategorija:    x['Kategorija'] || 'Pizze',
+        Podkategorija: x['Podkategorija'] || null,
+      })),
 
-  DESERTI: data.deserti.map((x) => ({
-    Naziv:   x['Naziv deserta'] || x['Naziv'],
-    Opis:    x['Opis'] || null,
-    Cijena:  fmtPrice(x['Cijena']),
-    Kategorija:    x['Kategorija'] || 'Deserti',
-    Podkategorija: x['Podkategorija'] || null,
-  })),
+      DESERTI: data.deserti.map((x) => ({
+        Naziv:   x['Naziv deserta'] || x['Naziv'],
+        Opis:    getTextField(x, ['Opis', 'Opis deserta', 'Opis jela', 'Sastojci', 'Description', 'Ingredients']),
+        Cijena:  fmtPrice(x['Cijena']),
+        Kategorija:    x['Kategorija'] || 'Deserti',
+        Podkategorija: x['Podkategorija'] || null,
+      })),
 
-  VINA: data.vina.map((x) => {
-    const { prices, priceText, main } = buildWinePrices(x);
-    return {
-      Naziv:  x['Naziv vina'] || x['Naziv'],
-      Sorta:  x['Sorta'] || null,
-      // glavna cijena (ako postoji boca, uzmi nju; inače čaša; u protivnom null)
-      Cijena: main || fmtPrice(x['Cijena']) || null,
-      Cijene: prices,              // {casa, boca, pola, q025, q0187}
-      CijenaTekst: priceText || null, // “čaša: 4.00 € • butelja: 18.00 € …”
-      Kategorija: x['Kategorija'] || 'Vina',
+      VINA: data.vina.map((x) => {
+        const { prices, priceText, main } = buildWinePrices(x);
+        return {
+          Naziv:  x['Naziv vina'] || x['Naziv'],
+          Sorta:  x['Sorta'] || null,
+          Cijena: main || fmtPrice(x['Cijena']) || null,
+          Cijene: prices,              // {casa, boca, pola, q025, q0187}
+          CijenaTekst: priceText || null,
+          Kategorija: x['Kategorija'] || 'Vina',
+        };
+      }),
+
+      DNEVNA: (data.dnevno || []).map((x) => ({
+        Naziv:   x['Naziv'] || x['Jelo'] || null,
+        Opis:    x['Opis'] || null,
+        Cijena:  fmtPrice(x['Cijena']),
+        Napomena: x['Napomena'] || null,
+      })),
+
+      FAQ: data.faq.map((x) => ({
+        Pitanje: x['Pitanje'] || x['Question'],
+        Odgovor: x['Odgovor'] || x['Answer'] || null,
+      })),
     };
-  }),
-
-  DNEVNA: (data.dnevno || []).map((x) => ({
-    Naziv:   x['Naziv'] || x['Jelo'] || null,
-    Opis:    x['Opis'] || null,
-    Cijena:  fmtPrice(x['Cijena']),
-    Napomena: x['Napomena'] || null,
-  })),
-
-  FAQ: data.faq.map((x) => ({
-    Pitanje: x['Pitanje'] || x['Question'],
-    Odgovor: x['Odgovor'] || x['Answer'] || null,
-  })),
-};
-
 
     const messages = [
       { role: 'system', content: SYSTEM_PROMPT },
-      ...(Array.isArray(history) ? history : []), // << kratka povijest iz widgeta
+      // dodatni "signal" o jeziku posjetitelja
+      ...(visitorLang ? [{ role: 'system', content: `VisitorLanguage=${visitorLang}` }] : []),
+      ...(Array.isArray(history) ? history : []),
       {
         role: 'user',
         content:
