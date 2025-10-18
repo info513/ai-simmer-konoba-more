@@ -89,23 +89,41 @@ function getTextField(rec, candidates) {
   return null;
 }
 
-// Skupi cijene vina iz raznih mogućih naziva kolona (čaša / butelja / 0.5 / 0.25 / 0.187)
+// NOVO: robusno hvatanje cijena vina (čaša / boca / 0.5 / 0.25 / 0.187)
+// pokriva padeže: boca/boce/boci + butelja + bottle; te 0,5 / 0.5 itd.
 function buildWinePrices(rec) {
   if (!rec) return { prices: {}, priceText: null, main: null };
+
   const entries = Object.entries(rec).filter(
     ([, v]) => v !== undefined && v !== null && String(v).trim() !== ''
   );
 
   let byGlass = null, bottle = null, half = null, q0187 = null, q025 = null;
+
+  const R_GLASS  = /(čaš|c(a|á)sa|glass)/i;
+  const R_BOTTLE = /(butelj|boc[aieo]?|boci|boce|bottle)/i;
+  const R_05     = /(0[\.,]?5(\s*l)?|\b0\s*,\s*5\b|\b0\s*\.\s*5\b)/i;
+  const R_025    = /(0[\.,]?25(\s*l)?|\b0\s*,\s*25\b|\b0\s*\.\s*25\b)/i;
+  const R_0187   = /(0[\.,]?187(\s*l)?|\b0\s*,\s*187\b|\b0\s*\.\s*187\b)/i;
+
   for (const [key, raw] of entries) {
-    const k = key.toLowerCase();
+    const k = String(key);
     const val = typeof raw === 'string' ? raw.replace(',', '.').trim() : raw;
 
-    if (!byGlass && (k.includes('čaš') || k.includes('casa') || k.includes('glass'))) { byGlass = val; continue; }
-    if (!bottle  && (k.includes('butelj') || k.includes('boca') || k.includes('bottle'))) { bottle = val; continue; }
-    if (!half    && (k.includes('0.5') || k.includes('0,5'))) { half = val; continue; }
-    if (!q025    && (k.includes('0.25') || k.includes('0,25'))) { q025 = val; continue; }
-    if (!q0187   && (k.includes('0.187') || k.includes('0,187'))) { q0187 = val; continue; }
+    if (!byGlass && R_GLASS.test(k))  { byGlass = val; continue; }
+    if (!bottle  && R_BOTTLE.test(k)) { bottle  = val; continue; }
+    if (!half    && R_05.test(k))     { half    = val; continue; }
+    if (!q025    && R_025.test(k))    { q025    = val; continue; }
+    if (!q0187   && R_0187.test(k))   { q0187   = val; continue; }
+  }
+
+  // fallbackovi za tipična imena
+  if (!bottle) {
+    const fbBottle = getField(rec, [
+      'Cijena po boci', 'Cijena boce', 'Cijena butelje',
+      'Bottle price', 'Price bottle', 'Cijena'
+    ]);
+    if (fbBottle) bottle = fbBottle;
   }
 
   const prices = {
@@ -191,7 +209,7 @@ Ti si **AI SIMMER** – digitalni asistent restorana **Konoba More** u Splitu.
 
 🌐 Jezik:
 - Uvijek odgovaraj na jeziku **posljednje korisničke poruke**.
-- Ako je dostupna varijabla VisitorLanguage, koristi je kao preferirani jezik, osim ako je jezik korisničke poruke drugačiji – tada slijedi jezik poruke.
+- Ako je dostupna varijabla VisitorLanguage, koristi je kao preferirani jezik, osim ako je jezik poruke drugačiji – tada slijedi jezik poruke.
 - Primjeri podržanih jezika: hr/en/it/de — ali se prilagodi bilo kojem jeziku koji korisnik koristi.
 
 📋 Podaci i pravila:
@@ -250,7 +268,6 @@ app.post('/api/ask', async (req, res) => {
 
     const data = await loadRestaurantBundle(slug);
 
-    // mapiranje – uključujemo opise, kategorije i formatirane cijene + sve cijene vina
     const context = {
       RESTORAN: {
         ...data.rest,
@@ -312,7 +329,6 @@ app.post('/api/ask', async (req, res) => {
 
     const messages = [
       { role: 'system', content: SYSTEM_PROMPT },
-      // dodatni "signal" o jeziku posjetitelja
       ...(visitorLang ? [{ role: 'system', content: `VisitorLanguage=${visitorLang}` }] : []),
       ...(Array.isArray(history) ? history : []),
       {
